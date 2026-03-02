@@ -31,7 +31,7 @@ suppressPackageStartupMessages({
   library(DBI)
   library(RMariaDB)
   library(readr)
-  library(dplyr)
+  library(tidyverse)
   library(lubridate)
 })
 ```
@@ -99,6 +99,14 @@ silso_df <- read_silso_daily_txt(silso_url)
 
 head(silso_df)
 ```
+## Monthly EDA
+
+```{r}
+silso_df$month <- as.factor(silso_df$month)
+ggplot(silso_df) + geom_boxplot(aes(x=sn,group=month,y=month))
+```
+
+
 
 ## 4. Connect to MySQL
 
@@ -182,4 +190,61 @@ LIMIT 10;",
 mysql_db, table_name)
 
 dbGetQuery(con, qry)
+```
+## Begin 100 Year Rolling Period
+
+
+```{r}
+rolling_table_name <- "sunspot_daily_silso_100y"
+
+create_rolling_sql <- sprintf(
+"CREATE TABLE IF NOT EXISTS `%s`.`%s` (
+   `date` DATE NOT NULL,
+   `year` SMALLINT NOT NULL,
+   `month` TINYINT NOT NULL,
+   `day` TINYINT NOT NULL,
+   `dec_date` DOUBLE NULL,
+   `sn` DOUBLE NULL,
+   `sd` DOUBLE NULL,
+   `nobs` INT NULL,
+   `prov_flag` CHAR(1) NOT NULL DEFAULT '',
+   `is_provisional` TINYINT(1) NOT NULL DEFAULT 0,
+   `refreshed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ON UPDATE CURRENT_TIMESTAMP,
+   `source_table` VARCHAR(64) NOT NULL DEFAULT 'sunspot_daily_silso',
+   PRIMARY KEY (`date`),
+   KEY `idx_year_month` (`year`,`month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+mysql_db, rolling_table_name)
+
+dbExecute(con, create_rolling_sql)
+```
+
+## 3) Refresh it each run (simple + safe)
+
+```{r}
+# Step 3 (fixed): refresh the rolling 100-year table
+
+# 1) TRUNCATE as its own statement
+truncate_sql <- sprintf(
+  "TRUNCATE TABLE `%s`.`%s`",
+  mysql_db, rolling_table_name
+)
+dbExecute(con, truncate_sql)
+
+# 2) INSERT as its own statement
+insert_sql <- sprintf("
+  INSERT INTO `%s`.`%s`
+    (`date`,`year`,`month`,`day`,`dec_date`,`sn`,`sd`,`nobs`,`prov_flag`,`is_provisional`)
+  SELECT
+    `date`,`year`,`month`,`day`,`dec_date`,`sn`,`sd`,`nobs`,`prov_flag`,`is_provisional`
+  FROM `%s`.`%s`
+  WHERE `date` >= (CURDATE() - INTERVAL 100 YEAR)
+  ORDER BY `date`
+",
+  mysql_db, rolling_table_name,
+  mysql_db, table_name
+)
+
+dbExecute(con, insert_sql)
 ```
