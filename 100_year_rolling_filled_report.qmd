@@ -1,0 +1,64 @@
+---
+title: "100 Year Rollinng (and filled)"
+format: html
+editor: visual
+---
+
+# 1. Load Required Libraries
+
+```{r,message=FALSE,echo=FALSE}
+suppressPackageStartupMessages({
+  library(DBI)
+  library(RMariaDB)
+  library(readr)
+  library(tidyverse)
+  library(lubridate)
+  library(zoo)
+  library(pracma)
+})
+```
+
+# 2. Configuration
+
+```{r}
+rm(list=ls())
+mysql_host <- "localhost"
+mysql_user <- "root"
+mysql_pass <- "dJj135790"
+mysql_port <- 3333
+mysql_db   <- "silso"
+
+## Connect to MySQL
+con <- dbConnect(
+  RMariaDB::MariaDB(),
+  host = mysql_host,
+  user = mysql_user,
+  password = mysql_pass,
+  port = mysql_port,
+  dbname = mysql_db
+)
+```
+
+## Grab 100 Rolling Table: Daily ISN
+
+```{r}
+rolling <- tbl(con, "daily_rolling_100yr") |> collect()
+rolling <- rolling %>%
+  arrange(date) %>%
+  mutate(
+    sn = if_else(sn == 0, NA_real_, sn),
+    sn = zoo::na.locf(sn, na.rm = FALSE)
+  )
+
+```
+
+## Grab 100 Rolling Table: N/S Hempishere ISN
+
+```{r}
+hempis_filled <- tbl(con, "hemisphere") |> collect()
+hempis_filled <- hempis_filled  %>%
+  arrange(date) %>%
+  mutate(across(c(sn_tot, sn_n, sn_s), ~ if_else(.x == 0, NA_real_, .x))) %>%
+  mutate(across(c(sn_tot, sn_n, sn_s), ~ zoo::na.locf(.x, na.rm = FALSE)))
+
+```
