@@ -42,62 +42,85 @@ suppressPackageStartupMessages({
 mysql_host <- "localhost"
 mysql_user <- "root"
 mysql_pass <- "dJj135790"
-mysql_port <- 3306
+mysql_port <- 3333
 mysql_db   <- "silso"
 
-table_name <- "sunspot_daily_silso"
 
-silso_url <- "https://www.sidc.be/silso/DATA/SN_d_tot_V2.0.txt"
+## 4. Connect to MySQL
+
+con <- dbConnect(
+  RMariaDB::MariaDB(),
+  host = mysql_host,
+  user = mysql_user,
+  password = mysql_pass,
+  port = mysql_port,
+  dbname = mysql_db
+)
+
+
+
+table_name <- "daily"
+
+silso_daily <-"https://www.sidc.be/silso/DATA/SN_d_tot_V2.0.csv"
+silso_hemp <-"https://www.sidc.be/silso/DATA/SN_d_hem_V2.0.csv"
 ```
 
 ## 3. Download and Parse SILSO Daily File
 
 ```{r}
-read_silso_daily_txt <- function(url) {
-
-  tf <- tempfile(fileext = ".txt")
-  download.file(url, tf, mode = "wb", quiet = TRUE)
-
-  fwf <- fwf_positions(
-    start = c(1, 6, 9, 12, 22, 26, 33, 37),
-    end   = c(4, 7,10, 19, 24, 30, 35, 37),
-    col_names = c("year","month","day","dec_date","sn","sd","nobs","prov_flag")
-  )
-
-  read_fwf(
-    tf,
-    col_positions = fwf,
+read_silso_csv <- function(url, col_names) {
+  read_delim(
+    url,
+    col_names = col_names,
     col_types = cols(
-      year = col_integer(),
-      month = col_integer(),
-      day = col_integer(),
-      dec_date = col_double(),
-      sn = col_double(),
-      sd = col_double(),
-      nobs = col_integer(),
-      prov_flag = col_character()
+      year       = col_integer(),
+      month      = col_integer(),
+      day        = col_integer(),
+      dec_date   = col_double(),
+      sn         = col_double(),
+      sd         = col_double(),
+      nobs       = col_integer(),
+      prov_flag  = col_integer()   # CSV encodes: 1 = definitive, 0 = provisional
     ),
-    trim_ws = TRUE,
-    progress = FALSE
+    delim     = ";",
+    trim_ws   = TRUE,
+    progress  = FALSE
   ) %>%
     mutate(
       date = as.Date(sprintf("%04d-%02d-%02d", year, month, day)),
       sn = na_if(sn, -1),
       sd = na_if(sd, -1),
-      prov_flag = if_else(is.na(prov_flag), "", prov_flag),
-      is_provisional = if_else(prov_flag == "*", 1L, 0L)
-    ) %>%
-    select(
-      date, year, month, day,
-      dec_date, sn, sd, nobs,
-      prov_flag, is_provisional
+      # CSV: 1 = definitive, 0 = provisional  →  invert to is_provisional flag
+      is_provisional = if_else(is.na(prov_flag) | prov_flag == 0L, 1L, 0L)
     ) %>%
     arrange(date)
 }
 
-silso_df <- read_silso_daily_txt(silso_url)
+# Column names for the total sunspot number file (SN_d_tot_V2.0.csv)
+daily_cols <- c("year", "month", "day", "dec_date", "sn", "sd", "nobs", "prov_flag")
+
+# Column names for the hemispheric file (SN_d_hem_V2.0.csv)
+# 14 columns per SILSO documentation:
+#   date (3) | dec_date | sn_tot, sn_n, sn_s | sd_tot, sd_n, sd_s |
+#   nobs_tot, nobs_n, nobs_s | prov_flag
+hemp_cols  <- c("year", "month", "day", "dec_date",
+                "sn_tot", "sn_n", "sn_s",
+                "sd_tot", "sd_n", "sd_s",
+                "nobs_tot", "nobs_n", "nobs_s",
+                "prov_flag")
+
+silso_df      <- read_silso_csv(silso_daily, daily_cols) %>%
+  select(date, year, month, day, dec_date, sn, sd, nobs, prov_flag, is_provisional)
+
+silso_hemp_df <- read_silso_csv(silso_hemp, hemp_cols) %>%
+  select(date, year, month, day, dec_date,
+         sn_tot, sn_n, sn_s,
+         sd_tot, sd_n, sd_s,
+         nobs_tot, nobs_n, nobs_s,
+         prov_flag, is_provisional)
 
 head(silso_df)
+head(silso_hemp_df)
 ```
 ## Monthly EDA
 
@@ -108,20 +131,7 @@ ggplot(silso_df) + geom_boxplot(aes(x=sn,group=month,y=month))
 
 
 
-## 4. Connect to MySQL
 
-```{r}
-con <- dbConnect(
-  RMariaDB::MariaDB(),
-  host = mysql_host,
-  user = mysql_user,
-  password = mysql_pass,
-  port = mysql_port,
-  dbname = mysql_db
-)
-
-con
-```
 
 ## 5. Create Target Table (If Needed)
 
@@ -191,6 +201,7 @@ mysql_db, table_name)
 
 dbGetQuery(con, qry)
 ```
+
 ## Begin 100 Year Rolling Period
 
 

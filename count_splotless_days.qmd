@@ -1,0 +1,45 @@
+---
+title: "Count Spotless Day : 2000-2025"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r,message=FALSE,echo=FALSE}
+library(tidyverse)
+library(lubridate)
+
+# Example: read your Excel file
+df <- readxl::read_excel("sdic_isn.xlsx")
+```
+```{r}
+# Count days per month where ISN == 0
+result <- df %>%
+  mutate(
+    date = as.Date(Ymd),                 # ensure date format
+    year_month = floor_date(date, "month")
+  ) %>%
+  filter(ISN == 0) %>%
+  group_by(year_month) %>%
+  summarise(days_isn_zero = n(), .groups = "drop") %>%
+  arrange(year_month)
+
+summary(result)
+```
+
+# Plot Spotless Days
+
+```{r}
+ggplot(result) + geom_histogram(aes(x=days_isn_zero))
+ggplot(result) + geom_boxplot(aes(x=days_isn_zero))
+```
+# Count by Month
+
+```{r}
+ggplot(result) + geom_col(aes(x=year_month,y=days_isn_zero))
+```
+```{r}
+result |> filter(year_month >='2014-01-01') |>
+ggplot() + geom_col(aes(x=year_month,y=days_isn_zero))
+```

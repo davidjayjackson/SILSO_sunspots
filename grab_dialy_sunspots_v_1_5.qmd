@@ -1,0 +1,410 @@
+---
+title: "SILSO Daily Sunspot Numbers → MySQL (solar schema)"
+author: "David Jackson"
+format:
+  html:
+    toc: true
+    code-fold: false
+  pdf: default
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Overview
+
+This notebook:
+
+1. Downloads the official **SILSO Daily Total Sunspot Number (V2.0)**
+2. Parses the fixed-width file
+3. Creates a MySQL table in the `solar` schema (if not exists)
+4. Upserts the data keyed on `date`
+5. Verifies the latest rows
+
+---
+
+# 1. Load Required Libraries
+
+```{r}
+suppressPackageStartupMessages({
+  library(DBI)
+  library(RMariaDB)
+  library(readr)
+  library(tidyverse)
+  library(lubridate)
+  library(zoo)
+  library(pracma)
+})
+```
+
+# 2. Configuration
+
+```{r}
+mysql_host <- "localhost"
+mysql_user <- "root"
+mysql_pass <- "dJj135790"
+mysql_port <- 3333
+mysql_db   <- "silso"
+
+
+## 4. Connect to MySQL
+
+
+con <- dbConnect(
+  RMariaDB::MariaDB(),
+  host = mysql_host,
+  user = mysql_user,
+  password = mysql_pass,
+  port = mysql_port,
+  dbname = mysql_db
+)
+
+con
+
+
+table_daily <- "daily"
+table_hemp  <- "hemisphere"
+
+silso_daily <-"https://www.sidc.be/silso/DATA/SN_d_tot_V2.0.csv"
+silso_hemp <-"https://www.sidc.be/silso/DATA/SN_d_hem_V2.0.csv"
+```
+
+## 3. Download and Parse SILSO Files
+
+```{r}
+# --- SN_d_tot_V2.0.csv: daily total sunspot numbers ---
+read_silso_daily <- function(url) {
+  col_names <- c("year", "month", "day", "dec_date", "sn", "sd", "nobs", "prov_flag")
+
+  read_delim(
+    url,
+    col_names = col_names,
+    col_types = cols(
+      year      = col_integer(),
+      month     = col_integer(),
+      day       = col_integer(),
+      dec_date  = col_double(),
+      sn        = col_double(),
+      sd        = col_double(),
+      nobs      = col_integer(),
+      prov_flag = col_integer()  # 1 = definitive, 0 = provisional
+    ),
+    delim    = ";",
+    trim_ws  = TRUE,
+    progress = FALSE
+  ) %>%
+    mutate(
+      date           = as.Date(sprintf("%04d-%02d-%02d", year, month, day)),
+      sn             = na_if(sn, -1),
+      sd             = na_if(sd, -1),
+      is_provisional = if_else(is.na(prov_flag) | prov_flag == 0L, 1L, 0L)
+    ) %>%
+    select(date, year, month, day, dec_date, sn, sd, nobs, prov_flag, is_provisional) %>%
+    arrange(date)
+}
+
+# --- SN_d_hem_V2.0.csv: daily hemispheric sunspot numbers ---
+read_silso_hemp <- function(url) {
+  col_names <- c("year", "month", "day", "dec_date",
+                 "sn_tot", "sn_n", "sn_s",
+                 "sd_tot", "sd_n", "sd_s",
+                 "nobs_tot", "nobs_n", "nobs_s",
+                 "prov_flag")
+
+  read_delim(
+    url,
+    col_names = col_names,
+    col_types = cols(
+      year     = col_integer(),
+      month    = col_integer(),
+      day      = col_integer(),
+      dec_date = col_double(),
+      sn_tot   = col_double(),
+      sn_n     = col_double(),
+      sn_s     = col_double(),
+      sd_tot   = col_double(),
+      sd_n     = col_double(),
+      sd_s     = col_double(),
+      nobs_tot = col_integer(),
+      nobs_n   = col_integer(),
+      nobs_s   = col_integer(),
+      prov_flag = col_integer()  # 1 = definitive, 0 = provisional
+    ),
+    delim    = ";",
+    trim_ws  = TRUE,
+    progress = FALSE
+  ) %>%
+    mutate(
+      date           = as.Date(sprintf("%04d-%02d-%02d", year, month, day)),
+      sn_tot         = na_if(sn_tot, -1),
+      sn_n           = na_if(sn_n,   -1),
+      sn_s           = na_if(sn_s,   -1),
+      sd_tot         = na_if(sd_tot, -1),
+      sd_n           = na_if(sd_n,   -1),
+      sd_s           = na_if(sd_s,   -1),
+      nobs_n         = na_if(nobs_n, -1L),  # always -1 per SILSO docs
+      nobs_s         = na_if(nobs_s, -1L),  # always -1 per SILSO docs
+      is_provisional = if_else(is.na(prov_flag) | prov_flag == 0L, 1L, 0L)
+    ) %>%
+    select(date, year, month, day, dec_date,
+           sn_tot, sn_n, sn_s,
+           sd_tot, sd_n, sd_s,
+           nobs_tot, nobs_n, nobs_s,
+           prov_flag, is_provisional) %>%
+    arrange(date)
+}
+
+silso_df      <- read_silso_daily(silso_daily)
+silso_hemp_df <- read_silso_hemp(silso_hemp)
+
+head(silso_df)
+head(silso_hemp_df)
+```
+## Monthly EDA
+
+```{r}
+silso_df$month <- as.factor(silso_df$month)
+ggplot(silso_df) + geom_boxplot(aes(x=sn,group=month,y=month))
+```
+
+
+
+
+
+## 5. Create Target Tables (If Needed)
+
+```{r}
+# --- daily (SN_d_tot_V2.0) ---
+create_daily_sql <- sprintf(
+"CREATE TABLE IF NOT EXISTS `%s`.`%s` (
+   `date`           DATE NOT NULL,
+   `year`           SMALLINT NOT NULL,
+   `month`          TINYINT NOT NULL,
+   `day`            TINYINT NOT NULL,
+   `dec_date`       DOUBLE NULL,
+   `sn`             DOUBLE NULL,
+   `sd`             DOUBLE NULL,
+   `nobs`           INT NULL,
+   `prov_flag`      TINYINT(1) NOT NULL DEFAULT 1,
+   `is_provisional` TINYINT(1) NOT NULL DEFAULT 0,
+   `ingested_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+   `source`         VARCHAR(64) NOT NULL DEFAULT 'WDC-SILSO SN_d_tot_V2.0',
+   PRIMARY KEY (`date`),
+   KEY `idx_year_month` (`year`,`month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+mysql_db, table_daily)
+
+# --- hemisphere (SN_d_hem_V2.0) ---
+create_hemp_sql <- sprintf(
+"CREATE TABLE IF NOT EXISTS `%s`.`%s` (
+   `date`           DATE NOT NULL,
+   `year`           SMALLINT NOT NULL,
+   `month`          TINYINT NOT NULL,
+   `day`            TINYINT NOT NULL,
+   `dec_date`       DOUBLE NULL,
+   `sn_tot`         DOUBLE NULL,
+   `sn_n`           DOUBLE NULL,
+   `sn_s`           DOUBLE NULL,
+   `sd_tot`         DOUBLE NULL,
+   `sd_n`           DOUBLE NULL,
+   `sd_s`           DOUBLE NULL,
+   `nobs_tot`       INT NULL,
+   `nobs_n`         INT NULL,
+   `nobs_s`         INT NULL,
+   `prov_flag`      TINYINT(1) NOT NULL DEFAULT 1,
+   `is_provisional` TINYINT(1) NOT NULL DEFAULT 0,
+   `ingested_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+   `source`         VARCHAR(64) NOT NULL DEFAULT 'WDC-SILSO SN_d_hem_V2.0',
+   PRIMARY KEY (`date`),
+   KEY `idx_year_month` (`year`,`month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+mysql_db, table_hemp)
+
+dbExecute(con, create_daily_sql)
+dbExecute(con, create_hemp_sql)
+```
+
+## 6. Upsert Data
+
+```{r}
+# --- Upsert: daily ---
+stage_daily <- paste0(table_daily, "_stage")
+dbWriteTable(con, stage_daily, silso_df, overwrite = TRUE)
+
+upsert_daily_sql <- sprintf("
+INSERT INTO `%s`.`%s`
+  (`date`,`year`,`month`,`day`,`dec_date`,`sn`,`sd`,`nobs`,`prov_flag`,`is_provisional`)
+SELECT
+  `date`,`year`,`month`,`day`,`dec_date`,`sn`,`sd`,`nobs`,`prov_flag`,`is_provisional`
+FROM `%s`
+ON DUPLICATE KEY UPDATE
+  `dec_date`       = VALUES(`dec_date`),
+  `sn`             = VALUES(`sn`),
+  `sd`             = VALUES(`sd`),
+  `nobs`           = VALUES(`nobs`),
+  `prov_flag`      = VALUES(`prov_flag`),
+  `is_provisional` = VALUES(`is_provisional`),
+  `ingested_at`    = CURRENT_TIMESTAMP;",
+mysql_db, table_daily, stage_daily)
+
+dbExecute(con, upsert_daily_sql)
+dbExecute(con, sprintf("DROP TABLE `%s`;", stage_daily))
+
+# --- Upsert: hemisphere ---
+stage_hemp <- paste0(table_hemp, "_stage")
+dbWriteTable(con, stage_hemp, silso_hemp_df, overwrite = TRUE)
+
+upsert_hemp_sql <- sprintf("
+INSERT INTO `%s`.`%s`
+  (`date`,`year`,`month`,`day`,`dec_date`,
+   `sn_tot`,`sn_n`,`sn_s`,
+   `sd_tot`,`sd_n`,`sd_s`,
+   `nobs_tot`,`nobs_n`,`nobs_s`,
+   `prov_flag`,`is_provisional`)
+SELECT
+  `date`,`year`,`month`,`day`,`dec_date`,
+  `sn_tot`,`sn_n`,`sn_s`,
+  `sd_tot`,`sd_n`,`sd_s`,
+  `nobs_tot`,`nobs_n`,`nobs_s`,
+  `prov_flag`,`is_provisional`
+FROM `%s`
+ON DUPLICATE KEY UPDATE
+  `dec_date`       = VALUES(`dec_date`),
+  `sn_tot`         = VALUES(`sn_tot`),
+  `sn_n`           = VALUES(`sn_n`),
+  `sn_s`           = VALUES(`sn_s`),
+  `sd_tot`         = VALUES(`sd_tot`),
+  `sd_n`           = VALUES(`sd_n`),
+  `sd_s`           = VALUES(`sd_s`),
+  `nobs_tot`       = VALUES(`nobs_tot`),
+  `nobs_n`         = VALUES(`nobs_n`),
+  `nobs_s`         = VALUES(`nobs_s`),
+  `prov_flag`      = VALUES(`prov_flag`),
+  `is_provisional` = VALUES(`is_provisional`),
+  `ingested_at`    = CURRENT_TIMESTAMP;",
+mysql_db, table_hemp, stage_hemp)
+
+dbExecute(con, upsert_hemp_sql)
+dbExecute(con, sprintf("DROP TABLE `%s`;", stage_hemp))
+```
+
+## 7. Verify Latest Rows
+
+```{r}
+# daily
+dbGetQuery(con, sprintf("
+SELECT date, sn, sd, nobs, is_provisional
+FROM `%s`.`%s`
+ORDER BY date DESC LIMIT 10;",
+mysql_db, table_daily))
+
+# hemisphere
+dbGetQuery(con, sprintf("
+SELECT date, sn_tot, sn_n, sn_s, is_provisional
+FROM `%s`.`%s`
+ORDER BY date DESC LIMIT 10;",
+mysql_db, table_hemp))
+```
+## Begin 100 Year Rolling Period
+
+```{r}
+rolling_daily_name <- "daily_100y"
+rolling_hemp_name  <- "hemisphere_100y"
+
+# --- daily_100y ---
+create_rolling_daily_sql <- sprintf(
+"CREATE TABLE IF NOT EXISTS `%s`.`%s` (
+   `date`         DATE NOT NULL,
+   `year`         SMALLINT NOT NULL,
+   `month`        TINYINT NOT NULL,
+   `day`          TINYINT NOT NULL,
+   `dec_date`     DOUBLE NULL,
+   `sn_ma100`     DOUBLE NULL COMMENT '100-year rolling mean of daily total sunspot number',
+   `sd_ma100`     DOUBLE NULL COMMENT '100-year rolling mean of daily std deviation',
+   `refreshed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ON UPDATE CURRENT_TIMESTAMP,
+   PRIMARY KEY (`date`),
+   KEY `idx_year_month` (`year`,`month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+mysql_db, rolling_daily_name)
+
+# --- hemisphere_100y ---
+create_rolling_hemp_sql <- sprintf(
+"CREATE TABLE IF NOT EXISTS `%s`.`%s` (
+   `date`           DATE NOT NULL,
+   `year`           SMALLINT NOT NULL,
+   `month`          TINYINT NOT NULL,
+   `day`            TINYINT NOT NULL,
+   `dec_date`       DOUBLE NULL,
+   `sn_tot_ma100`   DOUBLE NULL COMMENT '100-year rolling mean of total sunspot number',
+   `sn_n_ma100`     DOUBLE NULL COMMENT '100-year rolling mean of North hemisphere sunspot number',
+   `sn_s_ma100`     DOUBLE NULL COMMENT '100-year rolling mean of South hemisphere sunspot number',
+   `refreshed_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ON UPDATE CURRENT_TIMESTAMP,
+   PRIMARY KEY (`date`),
+   KEY `idx_year_month` (`year`,`month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+mysql_db, rolling_hemp_name)
+
+dbExecute(con, create_rolling_daily_sql)
+dbExecute(con, create_rolling_hemp_sql)
+```
+
+## Compute and Write 100-Year Rolling Averages
+
+A 100-year rolling average uses a window of 36,524 days (~100 * 365.24).
+`pracma::movavg` is used with `type = "s"` (simple moving average), which
+returns a full-length vector with the leading values computed on partial
+windows as the series builds up.
+
+```{r}
+library(pracma)
+
+window_days <- 36524L  # 100 years * 365.24 days
+
+# --- daily_100y: rolling mean of sn and sd ---
+daily_100y_df <- silso_df %>%
+  arrange(date) %>%
+  mutate(
+    sn_ma100 = movavg(replace(sn, is.na(sn), 0), n = window_days, type = "s"),
+    sd_ma100 = movavg(replace(sd, is.na(sd), 0), n = window_days, type = "s")
+  ) %>%
+  select(date, year, month, day, dec_date, sn_ma100, sd_ma100)
+
+# --- hemisphere_100y: rolling mean of sn_tot, sn_n, sn_s ---
+hemp_100y_df <- silso_hemp_df %>%
+  arrange(date) %>%
+  mutate(
+    sn_tot_ma100 = movavg(replace(sn_tot, is.na(sn_tot), 0), n = window_days, type = "s"),
+    sn_n_ma100   = movavg(replace(sn_n,   is.na(sn_n),   0), n = window_days, type = "s"),
+    sn_s_ma100   = movavg(replace(sn_s,   is.na(sn_s),   0), n = window_days, type = "s")
+  ) %>%
+  select(date, year, month, day, dec_date,
+         sn_tot_ma100, sn_n_ma100, sn_s_ma100)
+```
+
+```{r}
+# --- Write daily_100y to MySQL ---
+dbExecute(con, sprintf("TRUNCATE TABLE `%s`.`%s`", mysql_db, rolling_daily_name))
+dbWriteTable(con, rolling_daily_name, daily_100y_df, overwrite = FALSE, append = TRUE)
+
+# --- Write hemisphere_100y to MySQL ---
+dbExecute(con, sprintf("TRUNCATE TABLE `%s`.`%s`", mysql_db, rolling_hemp_name))
+dbWriteTable(con, rolling_hemp_name, hemp_100y_df, overwrite = FALSE, append = TRUE)
+```
+
+```{r}
+# --- Verify ---
+dbGetQuery(con, sprintf("
+SELECT date, sn_ma100, sd_ma100
+FROM `%s`.`%s`
+ORDER BY date DESC LIMIT 10;",
+mysql_db, rolling_daily_name))
+
+dbGetQuery(con, sprintf("
+SELECT date, sn_tot_ma100, sn_n_ma100, sn_s_ma100
+FROM `%s`.`%s`
+ORDER BY date DESC LIMIT 10;",
+mysql_db, rolling_hemp_name))
+```
