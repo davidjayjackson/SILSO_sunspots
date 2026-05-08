@@ -62,3 +62,57 @@ hempis_filled <- hempis_filled  %>%
   mutate(across(c(sn_tot, sn_n, sn_s), ~ zoo::na.locf(.x, na.rm = FALSE)))
 
 ```
+
+# Calculate Weekly Mean and Median ISN
+## Daily ISN
+
+```{r}
+rolling_weekly_mean <- rolling %>%
+  arrange(date) %>%
+  mutate(
+    sn = if_else(sn == 0, NA_real_, sn),
+    sn = zoo::na.locf(sn, na.rm = FALSE),
+    week = floor_date(date, "week"),
+  ) %>%
+  group_by(week) %>%
+  mutate(
+    weekly_mean   = mean(sn, na.rm = TRUE),
+    weekly_median = median(sn, na.rm = TRUE)
+  ) %>%
+  ungroup() |> select(date,week,sn,weekly_mean,weekly_median)
+```
+
+## Plot Weekly Mean/Median
+
+```{r}
+rolling_weekly_mean |> filter(date >="2019-01-01") |> 
+ggplot() + geom_line(aes(x=week,y=weekly_mean,colour="Mean")) +
+                              geom_point(aes(x=week,y=weekly_median,colour="Median"))
+```
+
+## North/South Hemisphere Weekly Mean/Median
+
+```{r}
+silso_hemp_mean <- hempis_filled %>%
+  arrange(date) %>%
+  mutate(across(c(sn_tot, sn_n, sn_s), ~ if_else(.x == 0, NA_real_, .x))) %>%
+  mutate(across(c(sn_tot, sn_n, sn_s), ~ zoo::na.locf(.x, na.rm = FALSE))) %>%
+  mutate(week = floor_date(date, "week")) %>%
+  group_by(week) %>%
+  mutate(
+    weekly_mean_tot   = mean(sn_tot, na.rm = TRUE),
+    weekly_median_tot = median(sn_tot, na.rm = TRUE),
+    weekly_mean_n     = mean(sn_n, na.rm = TRUE),
+    weekly_median_n   = median(sn_n, na.rm = TRUE),
+    weekly_mean_s     = mean(sn_s, na.rm = TRUE),
+    weekly_median_s   = median(sn_s, na.rm = TRUE)
+  ) %>%
+  ungroup() |> select(week,sn_n,sn_s,weekly_mean_n,weekly_mean_s,weekly_median_n,weekly_median_s)
+```
+## PLot Weekly Mean North/South
+
+```{r}
+silso_hemp_mean |> filter(week >="2010-01-01") |> 
+ggplot() + geom_smooth(aes(x=week,y=weekly_mean_n,colour="North")) +
+                              geom_smooth(aes(x=week,y=weekly_mean_s,colour="South"))
+```
