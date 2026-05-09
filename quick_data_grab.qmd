@@ -1,0 +1,166 @@
+---
+title: "Data Grab Short and To The Point"
+format: html
+editor: visual
+---
+
+# 1. Load Required Libraries
+
+```{r,message=FALSE,echo=FALSE}
+suppressPackageStartupMessages({
+  library(DBI)
+  library(RMariaDB)
+  library(readr)
+  library(tidyverse)
+  library(lubridate)
+  library(zoo)
+  library(pracma)
+})
+```
+
+# 2. Configuration
+
+```{r}
+rm(list=ls())
+mysql_host <- "localhost"
+mysql_user <- "root"
+mysql_pass <- "dJj135790"
+mysql_port <- 3333
+mysql_db   <- "rodney"
+
+## Connect to MySQL
+con <- dbConnect(
+  RMariaDB::MariaDB(),
+  host = mysql_host,
+  user = mysql_user,
+  password = mysql_pass,
+  port = mysql_port,
+  dbname = mysql_db
+)
+
+table_daily      <- "daily"
+table_hemp       <- "hemisphere"
+table_rolling    <- "daily_rolling_100yr"   # <-- new rolling window table
+
+silso_daily <- "https://www.sidc.be/silso/DATA/SN_d_tot_V2.0.csv"
+silso_hemp  <- "https://www.sidc.be/silso/DATA/SN_d_hem_V2.0.csv"
+```
+
+## 3. Download and Parse SILSO Files
+
+```{r}
+# --- SN_d_tot_V2.0.csv: daily total sunspot numbers ---
+read_silso_daily <- function(url) {
+  col_names <- c("year", "month", "day", "dec_date", "sn", "sd", "nobs", "prov_flag")
+
+  read_delim(
+    url,
+    col_names = col_names,
+    col_types = cols(
+      year      = col_integer(),
+      month     = col_integer(),
+      day       = col_integer(),
+      dec_date  = col_double(),
+      sn        = col_double(),
+      sd        = col_double(),
+      nobs      = col_integer(),
+      prov_flag = col_integer()  # 1 = definitive, 0 = provisional
+    ),
+    delim    = ";",
+    trim_ws  = TRUE,
+    progress = FALSE
+  ) %>%
+    mutate(
+      date           = as.Date(sprintf("%04d-%02d-%02d", year, month, day)),
+      sn             = na_if(sn, -1),
+      sd             = na_if(sd, -1),
+      is_provisional = if_else(is.na(prov_flag) | prov_flag == 0L, 1L, 0L)
+    ) %>%
+    select(date, year, month, day, dec_date, sn, sd, nobs, prov_flag, is_provisional) %>%
+    arrange(date)
+}
+
+# --- SN_d_hem_V2.0.csv: daily hemispheric sunspot numbers ---
+read_silso_hemp <- function(url) {
+  col_names <- c("year", "month", "day", "dec_date",
+                 "sn_tot", "sn_n", "sn_s",
+                 "sd_tot", "sd_n", "sd_s",
+                 "nobs_tot", "nobs_n", "nobs_s",
+                 "prov_flag")
+
+  read_delim(
+    url,
+    col_names = col_names,
+    col_types = cols(
+      year      = col_integer(),
+      month     = col_integer(),
+      day       = col_integer(),
+      dec_date  = col_double(),
+      sn_tot    = col_double(),
+      sn_n      = col_double(),
+      sn_s      = col_double(),
+      sd_tot    = col_double(),
+      sd_n      = col_double(),
+      sd_s      = col_double(),
+      nobs_tot  = col_integer(),
+      nobs_n    = col_integer(),
+      nobs_s    = col_integer(),
+      prov_flag = col_integer()  # 1 = definitive, 0 = provisional
+    ),
+    delim    = ";",
+    trim_ws  = TRUE,
+    progress = FALSE
+  ) %>%
+    mutate(
+      date           = as.Date(sprintf("%04d-%02d-%02d", year, month, day)),
+      sn_tot         = na_if(sn_tot, -1),
+      sn_n           = na_if(sn_n,   -1),
+      sn_s           = na_if(sn_s,   -1),
+      sd_tot         = na_if(sd_tot, -1),
+      sd_n           = na_if(sd_n,   -1),
+      sd_s           = na_if(sd_s,   -1),
+      nobs_n         = na_if(nobs_n, -1L),  # always -1 per SILSO docs
+      nobs_s         = na_if(nobs_s, -1L),  # always -1 per SILSO docs
+      is_provisional = if_else(is.na(prov_flag) | prov_flag == 0L, 1L, 0L)
+    ) %>%
+    select(date, year, month, day, dec_date,
+           sn_tot, sn_n, sn_s,
+           sd_tot, sd_n, sd_s,
+           nobs_tot, nobs_n, nobs_s,
+           prov_flag, is_provisional) %>%
+    arrange(date)
+}
+
+silso_df      <- read_silso_daily(silso_daily)
+silso_hemp_df <- read_silso_hemp(silso_hemp)
+
+head(silso_df)
+head(silso_hemp_df)
+```
+
+# Write Tables to Db
+
+```{r}
+dbWriteTable(con,"daily",silso_df,overwrite=TRUE)
+dbWriteTable(con,"hemisphere",silso_hemp_df,overwrite=TRUE)
+```
+
+# Creat 100 Year Rolling Table
+
+The cutoff is computed as today's date minus exactly 100 years (to the day), so
+the window automatically advances each time the notebook runs.
+
+```{r}
+# Exact 100-year window: same month/day, 100 years back
+cutoff_date     <- today() - years(100)
+rolling_100_df  <- silso_df %>% filter(date >= cutoff_date)
+
+cat(sprintf(
+  "Rolling window: %s → %s  (%d rows)\n",
+  min(rolling_100_df$date),
+  max(rolling_100_df$date),
+  nrow(rolling_100_df)
+))
+head(rolling_100_df)
+dbWriteTable(con,"rolling_100yr",rolling_100_df,overwrite=TRUE)
+```
